@@ -835,9 +835,9 @@ main :: proc() {
 
 	grammar["A"] = []Expr {
 		{1. / 10., new_node(.Time)},
-		{3. / 10., new_node(.Rand, Pair{new_node(.Number, -1), new_node(.Number, 1)})},
-		{3. / 10., new_node(.X)},
-		{3. / 10., new_node(.Y)},
+		{5. / 10., new_node(.Rand, Pair{new_node(.Number, -1), new_node(.Number, 1)})},
+		{2. / 10., new_node(.X)},
+		{2. / 10., new_node(.Y)},
 	}
 
 
@@ -849,7 +849,7 @@ main :: proc() {
 		{1. / 5., new_node(.Div, Pair{new_node(.Expr, "C"), new_node(.Expr, "C")})},
 	}
 
-	root := generate_rule("E", &grammar, 20)
+	root := generate_rule("E", &grammar, 40)
 
 	if root == nil {
 		fmt.eprintln("ERROR: not possible to generate the tree")
