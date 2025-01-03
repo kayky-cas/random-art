@@ -13,6 +13,7 @@ import r "vendor:raylib"
 import "vendor:raylib/rlgl"
 import "vendor:stb/image"
 
+
 RGBAColor :: [4]u8
 Color :: [3]f32
 
@@ -195,8 +196,20 @@ eval :: proc(root: ^Node, p: Vec2) -> Color {
 	return {l[0].value.(f32), l[1].value.(f32), l[2].value.(f32)}
 }
 
+wrap_inf :: proc(x: f32) -> f32 {
+	#partial switch math.classify_f32(x) {
+	case .NaN:
+		return 0
+	case .Inf:
+		return 1
+	case .Neg_Inf:
+		return -1
+	}
 
-generate_node_o :: proc(node: ^Node, grammar: ^Grammar, depth: int) -> ^Node {
+	return x
+}
+
+generate_node :: proc(node: ^Node, grammar: ^Grammar, depth: int) -> ^Node {
 	switch node.kind {
 	case .Time:
 		fallthrough
@@ -237,7 +250,7 @@ generate_node_o :: proc(node: ^Node, grammar: ^Grammar, depth: int) -> ^Node {
 		if y == nil {return nil}
 
 		if x.kind == .Number && y.kind == .Number {
-			return new_node(.Number, x.value.(f32) / y.value.(f32))
+			return new_node(.Number, wrap_inf(x.value.(f32) / y.value.(f32)))
 		}
 
 		return new_node(node.kind, Pair{x, y})
@@ -279,7 +292,7 @@ generate_node_o :: proc(node: ^Node, grammar: ^Grammar, depth: int) -> ^Node {
 		if x == nil {return nil}
 
 		if x.kind == .Number {
-			return new_node(.Number, math.sinh(x.value.(f32)))
+			return new_node(.Number, wrap_inf(math.sinh(x.value.(f32))))
 		}
 
 		return new_node(node.kind, x)
@@ -309,56 +322,6 @@ generate_node_o :: proc(node: ^Node, grammar: ^Grammar, depth: int) -> ^Node {
 			return z
 		}
 
-		y := generate_node(node.value.(Triple).y, grammar, depth - 1)
-		if y == nil {return nil}
-		z := generate_node(node.value.(Triple).z, grammar, depth - 1)
-		if z == nil {return nil}
-		return new_node(node.kind, Triple{x, y, z})
-	case .Expr:
-		return generate_rule(node.value.(string), grammar, depth - 1)
-	}
-	return nil
-}
-
-generate_node :: proc(node: ^Node, grammar: ^Grammar, depth: int) -> ^Node {
-	switch node.kind {
-	case .Time:
-		fallthrough
-	case .Bool:
-		fallthrough
-	case .Number:
-		fallthrough
-	case .X:
-		fallthrough
-	case .Y:
-		return node
-	case .Plus:
-		fallthrough
-	case .Mul:
-		fallthrough
-	case .Mod:
-		fallthrough
-	case .Gt:
-		fallthrough
-	case .Div:
-		fallthrough
-	case .Gte:
-		x := generate_node(node.value.(Pair).x, grammar, depth - 1)
-		if x == nil {return nil}
-		y := generate_node(node.value.(Pair).y, grammar, depth - 1)
-		if y == nil {return nil}
-		return new_node(node.kind, Pair{x, y})
-	case .Rand:
-		return eval_node(node, 0)
-	case .Sin:
-		x := generate_node(node.value.(^Node), grammar, depth - 1)
-		if x == nil {return nil}
-		return new_node(node.kind, x)
-	case .RGB:
-		fallthrough
-	case .If:
-		x := generate_node(node.value.(Triple).x, grammar, depth - 1)
-		if x == nil {return nil}
 		y := generate_node(node.value.(Triple).y, grammar, depth - 1)
 		if y == nil {return nil}
 		z := generate_node(node.value.(Triple).z, grammar, depth - 1)
@@ -510,7 +473,22 @@ gen_shader :: proc(node: ^Node, sb: ^strings.Builder) {
 	}
 }
 
+dump_grammar :: proc(g: ^Grammar, sb: ^strings.Builder) {
+	for tag, rule in g {
+		fmt.sbprintf(sb, "%s -> ", tag)
+		for expr in rule {
+			fmt.sbprintf(sb, "%f ", expr.probability)
+			dump_tree(expr.value, sb)
+			fmt.sbprintf(sb, " | ")
+		}
+		fmt.sbprintf(sb, "\n")
+	}
+}
+
 dump_tree :: proc(node: ^Node, sb: ^strings.Builder) {
+	if node == nil {
+		return
+	}
 	switch node.kind {
 	case .Time:
 		fmt.sbprintf(sb, "time()")
@@ -598,7 +576,7 @@ dump_tree :: proc(node: ^Node, sb: ^strings.Builder) {
 		dump_tree(x, sb)
 		fmt.sbprintf(sb, ")")
 	case .Expr:
-		break
+		fmt.sbprintf(sb, "%s", node.value.(string))
 	case .Rand:
 		x := node.value.(Pair).x
 		y := node.value.(Pair).y
@@ -632,7 +610,7 @@ generate_rule :: proc(tag: string, grammar: ^Grammar, depth: int) -> ^Node {
 				continue
 			}
 
-			node := generate_node_o(expr.value, grammar, depth - 1)
+			node := generate_node(expr.value, grammar, depth - 1)
 
 			if node != nil {
 				return node
@@ -744,14 +722,9 @@ void main() {{
 }
 
 generate_real_time :: proc(tree: ^Node) -> int {
-	show_tree := false
+	show_fps := false
 
 	sb := strings.builder_make()
-	dump_tree(tree, &sb)
-
-	tree_str := strings.clone_to_cstring(strings.to_string(sb))
-
-	strings.builder_reset(&sb)
 	compile_shader(tree, &sb)
 
 	fragment := strings.to_cstring(&sb)
@@ -772,9 +745,10 @@ generate_real_time :: proc(tree: ^Node) -> int {
 	pause := false
 	time := f32(0)
 
+	sb_fps := strings.builder_make()
+
 	for !r.WindowShouldClose() {
 		dt := r.GetFrameTime()
-
 		r.SetShaderValue(shader, time_loc, &time, .FLOAT)
 
 		r.BeginDrawing();{
@@ -790,8 +764,10 @@ generate_real_time :: proc(tree: ^Node) -> int {
 				)
 			};r.EndShaderMode()
 
-			if show_tree {
-				r.DrawText(tree_str, 10, 10, 20, r.BLACK)
+			if show_fps {
+				fmt.sbprintf(&sb_fps, "%d", r.GetFPS())
+				r.DrawText(strings.to_cstring(&sb_fps), 10, 10, 20, r.BLACK)
+				strings.builder_reset(&sb_fps)
 			}
 		};r.EndDrawing()
 
@@ -804,11 +780,11 @@ generate_real_time :: proc(tree: ^Node) -> int {
 		}
 
 		if r.IsKeyPressed(.T) {
-			show_tree = true
+			show_fps = true
 		}
 
 		if r.IsKeyReleased(.T) {
-			show_tree = false
+			show_fps = false
 		}
 
 		if !pause {
@@ -819,47 +795,445 @@ generate_real_time :: proc(tree: ^Node) -> int {
 	return 0
 }
 
-main :: proc() {
+TokenKind :: enum {
+	Plus, // +
+	Star, // *
+	Slash, // /
+	Pipe, // |
+	X, // x
+	Y, // y
+	Ident, // [a-zA-Z][a-zA-Z0-9]*
+	Number, // [0-9]+(\.[0-9]+)?
+	Invalid,
+	EOF,
+	LParen, // (
+	RParen, // )
+	Comma, // ,
+}
+
+Token :: struct {
+	kind:  TokenKind,
+	value: string,
+	pos:   int,
+}
+
+Lexer :: struct {
+	source: string,
+	pos:    int,
+}
+
+peek_char :: proc(l: ^Lexer) -> byte {
+	if l.pos >= len(l.source) {
+		return 0
+	}
+	return l.source[l.pos]
+}
+
+next_char :: proc(l: ^Lexer) -> byte {
+	if l.pos >= len(l.source) {
+		return 0
+	}
+
+	c := l.source[l.pos]
+	l.pos += 1
+
+	return c
+}
+
+skip_whitespace :: proc(l: ^Lexer) {
+	for c := peek_char(l); strings.is_space(rune(c)); c = peek_char(l) {
+		next_char(l)
+	}
+}
+
+next_token :: proc(l: ^Lexer) -> Token {
+	skip_whitespace(l)
+
+	token := Token {
+		kind = .Invalid,
+		pos  = l.pos,
+	}
+
+	ch := next_char(l)
+
+	switch ch {
+	case '+':
+		token.kind = .Plus
+		token.value = "+"
+	case '*':
+		token.kind = .Star
+		token.value = "*"
+	case '/':
+		token.kind = .Slash
+		token.value = "/"
+	case '|':
+		token.kind = .Pipe
+		token.value = "|"
+	case 'x':
+		token.kind = .X
+		token.value = "x"
+	case 'y':
+		token.kind = .Y
+		token.value = "y"
+	case '(':
+		token.kind = .LParen
+		token.value = "("
+	case ')':
+		token.kind = .RParen
+		token.value = ")"
+	case ',':
+		token.kind = .Comma
+		token.value = ","
+	case 0:
+		token.kind = .EOF
+	case '0' ..= '9':
+		token.kind = .Number
+
+		has_dot := ch == '.'
+
+		for ch := peek_char(l);
+		    ch != 0 && (ch >= '0' && ch <= '9' || (!has_dot && ch == '.'));
+		    ch = peek_char(l) {
+			if ch == '.' {
+				has_dot = true
+			}
+			next_char(l)
+		}
+
+	case 'a' ..= 'z', 'A' ..= 'Z':
+		token.kind = .Ident
+
+		for ch := peek_char(l);
+		    ch != 0 &&
+		    (ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9');
+		    ch = peek_char(l) {
+			next_char(l)
+		}
+
+		token.value = l.source[token.pos:l.pos]
+	}
+
+	return token
+}
+
+parse_rgb :: proc(l: ^Lexer) -> ^Node {
+	rgb_ident := next_token(l)
+
+	if rgb_ident.kind != .Ident || rgb_ident.value != "rgb" || next_token(l).kind != .LParen {
+		return nil
+	}
+
+	r := parse_node(l)
+
+	if r == nil || next_token(l).kind != .Comma {
+		return nil
+	}
+
+	g := parse_node(l)
+
+	if g == nil || next_token(l).kind != .Comma {
+		return nil
+	}
+
+	b := parse_node(l)
+
+	if b == nil || next_token(l).kind != .RParen {
+		return nil
+	}
+
+	return new_node(NodeKind.RGB, Triple{r, g, b})
+}
+
+parse_ident :: proc(l: ^Lexer) -> ^Node {
+	token := next_token(l)
+	if token.kind != .Ident {
+		return nil
+	}
+	return new_node(NodeKind.Expr, token.value)
+}
+
+parse_add :: proc(l: ^Lexer) -> ^Node {
+	add_ident := next_token(l)
+
+	if add_ident.kind != .Ident || add_ident.value != "add" || next_token(l).kind != .LParen {
+		return nil
+	}
+
+	lhs := parse_node(l)
+
+	if lhs == nil || next_token(l).kind != .Comma {
+		return nil
+	}
+
+	rhs := parse_node(l)
+
+	if rhs == nil || next_token(l).kind != .RParen {
+		return nil
+	}
+
+	return new_node(NodeKind.Plus, Pair{lhs, rhs})
+}
+
+
+parse_mul :: proc(l: ^Lexer) -> ^Node {
+	mul_ident := next_token(l)
+
+	if mul_ident.kind != .Ident || mul_ident.value != "mul" || next_token(l).kind != .LParen {
+		return nil
+	}
+
+	lhs := parse_node(l)
+
+	if lhs == nil || next_token(l).kind != .Comma {
+		return nil
+	}
+
+	rhs := parse_node(l)
+
+	if rhs == nil || next_token(l).kind != .RParen {
+		return nil
+	}
+
+	return new_node(NodeKind.Mul, Pair{lhs, rhs})
+}
+
+parse_div :: proc(l: ^Lexer) -> ^Node {
+	div_ident := next_token(l)
+
+	if div_ident.kind != .Ident || div_ident.value != "div" || next_token(l).kind != .LParen {
+		return nil
+	}
+
+	lhs := parse_node(l)
+
+	if lhs == nil || next_token(l).kind != .Comma {
+		return nil
+	}
+
+	rhs := parse_node(l)
+
+	if rhs == nil || next_token(l).kind != .RParen {
+		return nil
+	}
+
+	return new_node(NodeKind.Div, Pair{lhs, rhs})
+}
+
+parse_sin :: proc(l: ^Lexer) -> ^Node {
+	sin_ident := next_token(l)
+
+	if sin_ident.kind != .Ident || sin_ident.value != "sin" || next_token(l).kind != .LParen {
+		return nil
+	}
+
+	v := parse_node(l)
+
+	if v == nil || next_token(l).kind != .RParen {
+		return nil
+	}
+
+	return new_node(NodeKind.Sin, v)
+}
+
+parse_rand :: proc(l: ^Lexer) -> ^Node {
+	rand_ident := parse_ident(l)
+
+	if rand_ident == nil ||
+	   rand_ident.value.(string) != "rand" ||
+	   next_token(l).kind != .LParen ||
+	   next_token(l).kind != .RParen {
+		return nil
+	}
+
+	return new_node(NodeKind.Rand, Pair{new_node(.Number, -1), new_node(.Number, 1)})
+}
+
+parse_time :: proc(l: ^Lexer) -> ^Node {
+	time_ident := parse_ident(l)
+
+	if time_ident == nil ||
+	   time_ident.value.(string) != "time" ||
+	   next_token(l).kind != .LParen ||
+	   next_token(l).kind != .RParen {
+		return nil
+	}
+
+	return new_node(NodeKind.Time)
+}
+
+parse_x :: proc(l: ^Lexer) -> ^Node {
+	x_token := next_token(l)
+
+	if x_token.kind != .X {
+		return nil
+	}
+
+	return new_node(NodeKind.X)
+}
+
+parse_y :: proc(l: ^Lexer) -> ^Node {
+	y_token := next_token(l)
+
+	if y_token.kind != .Y {
+		return nil
+	}
+
+	return new_node(NodeKind.Y)
+}
+
+parse_node :: proc(l: ^Lexer) -> ^Node {
+	pos := l.pos
+
+	if node := parse_rgb(l); node != nil {
+		return node
+	}
+
+	l.pos = pos
+
+	if node := parse_add(l); node != nil {
+		return node
+	}
+
+	l.pos = pos
+
+	if node := parse_mul(l); node != nil {
+		return node
+	}
+
+	l.pos = pos
+
+	if node := parse_rand(l); node != nil {
+		return node
+	}
+
+	l.pos = pos
+
+	if node := parse_time(l); node != nil {
+		return node
+	}
+
+	l.pos = pos
+
+	if node := parse_div(l); node != nil {
+		return node
+	}
+
+	l.pos = pos
+
+	if node := parse_sin(l); node != nil {
+		return node
+	}
+
+	l.pos = pos
+
+	if node := parse_x(l); node != nil {
+		return node
+	}
+
+	l.pos = pos
+
+	if node := parse_y(l); node != nil {
+		return node
+	}
+
+	l.pos = pos
+
+	if node := parse_ident(l); node != nil {
+		return node
+	}
+
+	l.pos = pos
+
+	return nil
+}
+
+parse_expr :: proc(l: ^Lexer) -> (Expr, bool) {
+	pipes_count := 0
+
+	token := next_token(l)
+
+	for ; token.kind == .Pipe; token = next_token(l) {
+		pipes_count += 1
+	}
+
+	l.pos = token.pos
+
+	if pipes_count == 0 {
+		return {}, false
+	}
+
+	node := parse_node(l)
+
+	if node == nil {
+		return {}, false
+	}
+
+	return {f32(pipes_count), node}, true
+}
+
+parse_rule :: proc(l: ^Lexer) -> (string, []Expr) {
+	tag_token := next_token(l)
+
+	if tag_token.kind != .Ident {
+		return "", nil
+	}
+
+	tag := tag_token.value
+
+	exprs: [dynamic]Expr
+
+	all_pipes: f32 = 0
+
+	for expr, ok := parse_expr(l); ok; expr, ok = parse_expr(l) {
+		all_pipes += expr.probability
+		append(&exprs, expr)
+	}
+
+	for &expr in exprs {
+		expr.probability /= all_pipes
+	}
+
+	return tag, exprs[:]
+}
+
+parse_grammar :: proc(l: ^Lexer) -> (string, Grammar) {
 	grammar := make(Grammar)
+	first_rule := ""
+
+	for tag, rule := parse_rule(l); tag != ""; tag, rule = parse_rule(l) {
+		if first_rule == "" {
+			first_rule = tag
+		}
+
+		grammar[tag] = rule
+	}
+
+	return first_rule, grammar
+}
+
+main :: proc() {
+	data, ok := os.read_entire_file("./grammar.ra")
+
+	if !ok {
+		fmt.eprintln("Error reading file")
+		os.exit(1)
+	}
+
+	lexer := Lexer{string(data), 0}
+
+	rule, grammar := parse_grammar(&lexer)
 	defer delete(grammar)
 
-	grammar["E"] = []Expr {
-		{
-			1,
-			new_node(
-				.RGB,
-				Triple{new_node(.Expr, "C"), new_node(.Expr, "C"), new_node(.Expr, "C")},
-			),
-		},
-	}
+	g_sb := strings.builder_make()
+	dump_grammar(&grammar, &g_sb)
+	fmt.println(strings.to_string(g_sb))
 
-	grammar["A"] = []Expr {
-		{1. / 10., new_node(.Time)},
-		{5. / 10., new_node(.Rand, Pair{new_node(.Number, -1), new_node(.Number, 1)})},
-		{2. / 10., new_node(.X)},
-		{2. / 10., new_node(.Y)},
-	}
-
-
-	grammar["C"] = []Expr {
-		{1. / 5., new_node(.Expr, "A")},
-		{1. / 5., new_node(.Plus, Pair{new_node(.Expr, "C"), new_node(.Expr, "C")})},
-		{1. / 5., new_node(.Mul, Pair{new_node(.Expr, "C"), new_node(.Expr, "C")})},
-		{1. / 5., new_node(.Sin, new_node(.Expr, "C"))},
-		{1. / 5., new_node(.Div, Pair{new_node(.Expr, "C"), new_node(.Expr, "C")})},
-	}
-
-	root := generate_rule("E", &grammar, 40)
+	root := generate_rule(rule, &grammar, 70)
 
 	if root == nil {
 		fmt.eprintln("ERROR: not possible to generate the tree")
 		os.exit(1)
 	}
-
-	tree_builder := strings.builder_make()
-	dump_tree(root, &tree_builder)
-
-	fmt.println(strings.to_string(tree_builder))
 
 	generate_real_time(root)
 }
